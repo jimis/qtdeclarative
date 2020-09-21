@@ -1,0 +1,103 @@
+# Smoke builds
+#
+# The goal of this workflow is to finish as fast as possible. Therefore some
+# choices have been made:
+# - no optimizations
+# - link to system-provided libraries instead of building
+#   bundled 3rd party libraries
+# - ccache
+
+name: Smoke build
+
+on: push
+
+env:
+  BRANCH:     dev
+  BRANCH_REF: refs/heads/dev
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, ubuntu-18.04, macos-10.15, windows-2019]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+
+    - uses: actions/checkout@v2
+      with:
+        path: source
+    - uses: actions/checkout@v2
+      with:
+        repository: ${{ github.repository_owner }}/qt5
+        path: qt5
+        ref: ${{ env.BRANCH_REF }}
+
+    - name: Setup host
+      run: ./qt5/ci_scripts/setup.sh
+
+    - name: restore ccache
+      id: ccache
+      uses: actions/cache@v2
+      with:
+        path: ${{ runner.temp }}/ccache
+        # "github.run_id" is unique, which causes the cache to always get
+        # saved at the end of a successful run.
+        key:  ccache-${{ matrix.os }}-${{ github.ref }}-${{ github.run_id }}
+        # As the unique "key" above will never be found in the cache when the
+        # job starts, we need these broader "restore-keys" in order to match
+        # and restore the most recent cache.
+        restore-keys: |
+          ccache-${{ matrix.os }}-${{ github.ref }}-
+          ccache-${{ matrix.os }}-${{ env.BRANCH_REF }}-
+          ccache-${{ matrix.os }}-refs/heads/dev-
+          ccache-${{ matrix.os }}-
+
+    - uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+
+    - name: fetch and extract artifacts of module dependencies
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        WORKFLOW_NAME: ninja-build.yml
+        ARTIFACT_NAME: install_dir-${{ matrix.os }}
+        # tar -C 'D:\whatever' does not seem to work
+        ARTIFACT_EXTRACT_CMDLINE: funzip | zstd -d -c
+          | { cd '${{ runner.temp }}' && tar -xf - ; }
+        FORCE_BRANCH: ${{ env.BRANCH }}
+      run: |
+        pip install pyyaml
+        python ./qt5/ci_scripts/list_dependencies.py -i source/dependencies.yaml | xargs -n2 bash ./qt5/ci_scripts/fetch_github_artifact_and_run_command.sh
+
+    - name: configure
+      working-directory: build
+      run: "'${{ runner.temp }}'/install_dir/bin/qt-cmake-private${{ env.BAT_EXTENSION }}  ../source"
+    - name: ninja
+      working-directory: build
+      run: ninja
+
+    - name: Create installation artifact
+      run: ./qt5/ci_scripts/install.sh
+
+    - uses: actions/upload-artifact@v2
+      with:
+        name: install_dir-${{ matrix.os }}
+        path: install_dir.tar.zst
+
+    - name: various stats
+      # Print ccache utilization statistics, then reset them.
+      run: |
+        ccache -s
+        ccache -x 2>/dev/null || true
+        ccache -z
+
+    - name: print logfiles and other info
+      if: ${{ always() }}
+      run: ./qt5/ci_scripts/info.sh
