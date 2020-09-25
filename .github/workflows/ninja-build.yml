@@ -115,6 +115,9 @@ jobs:
       if: matrix.deps != ''
     - name: install compiler tools
       run:  ${{ matrix.install_cmd }}  ${{ matrix.tools }}  ${{ matrix.install_cmd_postfix }}
+    - name: configure ccache
+      run: |
+        ccache --set-config=sloppiness=file_macro,time_macros
     - name: print versions and environment
       run: |
         gcc --version    | head -1
