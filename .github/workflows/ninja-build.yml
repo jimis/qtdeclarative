@@ -66,9 +66,10 @@ jobs:
       run: echo noop
     - name: prepare Windows
       if: runner.os == 'Windows'
-      # Header pthread.h from postgres is included and creates issues.
-      # Also library zlib.lib is linked instead of the system one.
-      run: rm -rf "C:/Program Files/PostgreSQL/"
+      run: |
+        # Header pthread.h from postgres is included and creates issues.
+        # Also library zlib.lib is linked instead of the system one.
+        rm -rf "C:/Program Files/PostgreSQL/"
 
     - uses: actions/checkout@v2
       with:
@@ -88,7 +89,9 @@ jobs:
         GITHUB_TOKEN: ${{ github.token }}
         WORKFLOW_NAME: ninja-build.yml
         ARTIFACT_NAME: install_dir-${{ matrix.os }}
-        ARTIFACT_EXTRACT_CMDLINE: "funzip | zstd -d -c | tar -C $HOME -xf -"
+        # tar -C 'D:\whatever' does not seem to work
+        ARTIFACT_EXTRACT_CMDLINE: funzip | zstd -d -c
+          | { cd '${{ runner.temp }}' && tar -xf - ; }
         FORCE_BRANCH: ${{ env.BRANCH }}
       run: |
         pip install pyyaml
@@ -132,22 +135,25 @@ jobs:
       run:  mkdir build
     - name: configure
       working-directory: build
-      run: ~/install_dir/bin/qt-cmake-private${{ matrix.bat_extension }}  ../source
+      run: "'${{ runner.temp }}'/install_dir/bin/qt-cmake-private${{ matrix.bat_extension }}  ../source"
     - name: ninja
       working-directory: build
       run: ninja
 
     - name: Create installation artifact
-      working-directory: build
+      # Installing with DESTDIR set, means that the whole "prefix" hierarchy
+      # that we've set in configure will be formulated under DESTDIR.
+      # The reason is to avoid mixing with other stuff installed under prefix.
       run: |
-        DESTDIR=$HOME/dest_dir  cmake --install .
-        mkdir $HOME/artifacts
-        tar -cf - -C $HOME/dest_dir/$HOME  install_dir/  |  zstd -c > $HOME/artifacts/install_dir.tar.zst
+        DESTDIR=dest_dir  cmake --install build
+        # double escaping backslash because of bash double quotes and sed
+        tempdir_without_drive_prefix="`echo '${{ runner.temp }}' | sed 's/^[CD]:\\\\//'`"
+        tar -cf - -C "dest_dir/$tempdir_without_drive_prefix"  install_dir/  |  zstd -c > install_dir.tar.zst
 
     - uses: actions/upload-artifact@v2
       with:
         name: install_dir-${{ matrix.os }}
-        path: ~/artifacts/install_dir.tar.zst
+        path: install_dir.tar.zst
 
     - name: various stats
       # Print ccache utilization statistics, then reset them.
