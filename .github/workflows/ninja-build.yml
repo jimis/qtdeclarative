@@ -25,51 +25,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: ubuntu-18.04
-            os:   ubuntu-18.04
-            deps:  libgl-dev libglu-dev libpcre2-dev libz-dev libfreetype6-dev libpng-dev libjpeg-dev libsqlite3-dev
-            tools: ninja-build ccache
-            install_cmd: sudo apt-get -y install
-            configure_flags: -system-sqlite -system-pcre -system-zlib -system-freetype -system-libpng -system-libjpeg
-          - name: macos-10.15
-            os:   macos-10.15
-            deps:  jpeg sqlite
-            tools: ninja ccache pkg-config
-            install_cmd: brew install
-            # Specifically on macOS pkg_config has to be manually turned on otherwise libraries under /usr/local are not detected.
-            configure_flags: -feature-pkg-config -system-sqlite -system-libjpeg
-          - name: windows-2019
-            os:   windows-2019
-            install_cmd: choco install
-            install_cmd_postfix: --yes --no-progress
-            # Chocolatey sqlite package does not come with headers, so we build with bundled sqlite.
-            #deps: sqlite
-            tools: ninja ccache
-            # We don't want the system headers / libraries from Strawberry Perl while compiling with MinGW 8.1.0
-            configure_flags: -qt-sqlite -qt-pcre -qt-zlib -qt-freetype -qt-libpng -qt-libjpeg -no-feature-sql-psql -no-feature-sql-mysql -no-feature-sql-odbc
-            bat_extension: .bat
+        os: [ubuntu-20.04, ubuntu-18.04, macos-10.15, windows-2019]
     runs-on: ${{ matrix.os }}
 
-
     steps:
-
-    # Set a variable for repo name without owner prefix; for example "qtbase"
-    - name: set GITHUB_REPO_NAME
-      run: echo ::set-env name=GITHUB_REPO_NAME::$(echo "$GITHUB_REPOSITORY" | sed -e "s,[^/]*/,," -e "s/:refs//")
-
-    - name: prepare Linux
-      if: runner.os == 'Linux'
-      run: sudo apt-get update
-    - name: prepare macOS
-      if: runner.os == 'macOS'
-      run: echo noop
-    - name: prepare Windows
-      if: runner.os == 'Windows'
-      run: |
-        # Header pthread.h from postgres is included and creates issues.
-        # Also library zlib.lib is linked instead of the system one.
-        rm -rf "C:/Program Files/PostgreSQL/"
 
     - uses: actions/checkout@v2
       with:
@@ -79,6 +38,26 @@ jobs:
         repository: ${{ github.repository_owner }}/qt5
         path: qt5
         ref: ${{ env.BRANCH_REF }}
+
+    - name: Setup host
+      run: ./qt5/ci_scripts/setup.sh
+
+    - name: restore ccache
+      id: ccache
+      uses: actions/cache@v2
+      with:
+        path: ${{ runner.temp }}/ccache
+        # "github.run_id" is unique, which causes the cache to always get
+        # saved at the end of a successful run.
+        key:  ccache-${{ matrix.os }}-${{ github.ref }}-${{ github.run_id }}
+        # As the unique "key" above will never be found in the cache when the
+        # job starts, we need these broader "restore-keys" in order to match
+        # and restore the most recent cache.
+        restore-keys: |
+          ccache-${{ matrix.os }}-${{ github.ref }}-
+          ccache-${{ matrix.os }}-${{ env.BRANCH_REF }}-
+          ccache-${{ matrix.os }}-refs/heads/dev-
+          ccache-${{ matrix.os }}-
 
     - uses: actions/setup-python@v2
       with:
@@ -97,45 +76,12 @@ jobs:
         pip install pyyaml
         python ./qt5/ci_scripts/list_dependencies.py -i source/dependencies.yaml | xargs -n2 bash ./qt5/ci_scripts/fetch_github_artifact_and_run_command.sh
 
-    - name: restore ccache
-      id: ccache
-      uses: actions/cache@v2
-      with:
-        path: ~/.ccache
-        # "github.run_id" is unique, which causes the cache to always get
-        # saved at the end of a successful run.
-        key:  ccache-${{ matrix.os }}-${{ github.ref }}-${{ github.run_id }}
-        # As the unique "key" above will never be found in the cache when the
-        # job starts, we need these broader "restore-keys" in order to match
-        # and restore the most recent cache.
-        restore-keys: |
-          ccache-${{ matrix.os }}-${{ github.ref }}-
-          ccache-${{ matrix.os }}-${{ env.BRANCH_REF }}-
-          ccache-${{ matrix.os }}-
-
-    - name: install build dependencies
-      run:  ${{ matrix.install_cmd }}  ${{ matrix.deps }}  ${{ matrix.install_cmd_postfix }}
-      if: matrix.deps != ''
-    - name: install compiler tools
-      run:  ${{ matrix.install_cmd }}  ${{ matrix.tools }}  ${{ matrix.install_cmd_postfix }}
-    - name: configure ccache
-      run: |
-        ccache --set-config=sloppiness=file_macro,time_macros
-    - name: print versions and environment
-      run: |
-        gcc --version    | head -1
-        cmake --version  | head -1
-        echo Ninja `ninja --version`
-        { ninja --help || true ; } 2>&1 | grep "run N jobs in parallel"
-        ccache --version | head -1
-        echo Environment:
-        printenv
-
-    - name: make build directory
-      run:  mkdir build
+    - name: git submodule update
+      working-directory: source
+      run: git submodule update --init --recursive
     - name: configure
       working-directory: build
-      run: "'${{ runner.temp }}'/install_dir/bin/qt-cmake-private${{ matrix.bat_extension }}  ../source"
+      run: "'${{ runner.temp }}'/install_dir/bin/qt-cmake-private${{ env.BAT_EXTENSION }}  ../source"
     - name: ninja
       working-directory: build
       run: ninja
@@ -145,7 +91,7 @@ jobs:
       # that we've set in configure will be formulated under DESTDIR.
       # The reason is to avoid mixing with other stuff installed under prefix.
       run: |
-        DESTDIR=dest_dir  cmake --install build
+        DESTDIR=dest_dir  cmake --install build --strip
         # double escaping backslash because of bash double quotes and sed
         tempdir_without_drive_prefix="`echo '${{ runner.temp }}' | sed 's/^[CD]:\\\\//'`"
         tar -cf - -C "dest_dir/$tempdir_without_drive_prefix"  install_dir/  |  zstd -c > install_dir.tar.zst
@@ -157,16 +103,11 @@ jobs:
 
     - name: various stats
       # Print ccache utilization statistics, then reset them.
-      run:  ccache -s && ccache -z
-
-    - name: print logs and other info in case of failure
-      if: ${{ failure() }}
       run: |
-        echo ==== printenv ====
-        printenv
-        echo
-        echo ==== CMakeOutput.log ====
-        cat build/CMakeFiles/CMakeOutput.log
-        echo
-        echo ==== CMakeError.log ====
-        cat build/CMakeFiles/CMakeError.log
+        ccache -s
+        ccache -x 2>/dev/null || true
+        ccache -z
+
+    - name: print logfiles and other info
+      if: ${{ always() }}
+      run: ./qt5/ci_scripts/info.sh
